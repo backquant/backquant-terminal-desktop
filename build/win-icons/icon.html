@@ -1,0 +1,10 @@
+<!doctype html>
+<!-- Windows app + tray icon: white rounded tile filling the square, black B mark.
+     Rendered by build/win-icons/render.mjs (?size=N). Windows shows icons edge to edge,
+     so no macOS-style padding or drop shadow. -->
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; background: transparent; }
+  .tile { position: absolute; inset: 0; border-radius: 20%; background: #f8f8f8; }
+  .mark { position: absolute; left: -10%; top: -10%; width: 120%; height: 120%; filter: invert(1); }
+</style></head>
+<body><div class="tile"></div><img class="mark" src="../dmg-design/logo-white.png" alt="" /></body></html>

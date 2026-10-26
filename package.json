@@ -2,17 +2,21 @@
   "name": "backquant-terminal-desktop",
   "productName": "BackQuant Terminal",
   "version": "0.3.3",
-  "description": "BackQuant Terminal for macOS (Chromium)",
+  "description": "BackQuant Terminal",
+  "author": "BackQuant",
   "private": true,
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test app/urls.test.js app/update.test.js",
-    "dist": "electron-builder --mac dir --universal && bash build/make-dmg.sh"
+    "dist": "electron-builder --mac dir --universal && bash build/make-dmg.sh",
+    "dist:win": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
     "electron": "45.0.0",
-    "electron-builder": "26.0.12"
+    "electron-builder": "26.0.12",
+    "pe-library": "^1.0.1",
+    "resedit": "^2.0.3"
   },
   "build": {
     "appId": "com.backquant.desktop",
@@ -51,6 +55,28 @@
       },
       "artifactName": "BackQuant-Terminal.${ext}"
     },
-    "afterPack": "build/adhoc-sign.js"
+    "afterPack": "build/after-pack.js",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon-win.ico",
+      "artifactName": "BackQuant-Terminal-Setup.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BackQuant Terminal",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

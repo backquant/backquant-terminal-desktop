@@ -27,6 +27,21 @@ test('offers only a newer, published release, preferring the dmg', () => {
   assert.strictEqual(newerRelease(null, '0.3.0'), null);
 });
 
+test('Windows gets the .exe installer, macOS the .dmg', () => {
+  const rel = {
+    tag_name: 'v0.4.0',
+    html_url: 'page',
+    assets: [
+      { name: 'BackQuant-Terminal.dmg', browser_download_url: 'mac.dmg' },
+      { name: 'BackQuant-Terminal-Setup.exe', browser_download_url: 'win.exe' },
+      { name: 'BackQuant-Terminal-Setup.exe.blockmap', browser_download_url: 'win.blockmap' },
+    ],
+  };
+  assert.strictEqual(newerRelease(rel, '0.3.0', 'win32').url, 'win.exe');
+  assert.strictEqual(newerRelease(rel, '0.3.0', 'darwin').url, 'mac.dmg');
+  assert.strictEqual(newerRelease({ ...rel, assets: [rel.assets[0]] }, '0.3.0', 'win32').url, 'page');
+});
+
 test('a failed check throws instead of reporting up to date', async () => {
   await assert.rejects(fetchLatest(async () => ({ ok: false, status: 404 })), /HTTP 404/);
 });

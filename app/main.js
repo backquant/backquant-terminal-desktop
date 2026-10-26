@@ -1,5 +1,6 @@
-// BackQuant Terminal for macOS: a native window around https://terminal.backquant.com,
-// running on Chromium (Electron) for smooth charts on a full desk.
+// BackQuant Terminal for macOS and Windows: a native window around
+// https://terminal.backquant.com, running on Chromium (Electron) for smooth charts on a
+// full desk.
 //
 // Everything the terminal does (data, accounts, billing, the paywall) stays on the
 // server. This shell only adds the parts a browser tab would otherwise provide:
@@ -8,8 +9,8 @@
 //     user is usually already signed in (and Google refuses embedded webviews); the
 //     resulting code is handed back to this window over a loopback port
 //   * pop-out panels open as real windows, downloads land in ~/Downloads
-//   * site notifications become native macOS notifications
-//   * closing the window keeps the app running in the menu bar (and optionally at
+//   * site notifications become native notifications
+//   * closing the window keeps the app running in the menu bar / system tray (and optionally at
 //     login) so watch alerts, which arrive over the site's WebSocket, keep coming
 
 const {
@@ -39,11 +40,15 @@ const {
 const { fetchLatest, newerRelease } = require('./update');
 
 const APP_NAME = 'BackQuant Terminal';
+const IS_WIN = process.platform === 'win32';
 // Passed by the login item so a launch at login starts in the menu bar, window hidden.
 const HIDDEN_ARG = '--hidden';
 const LAUNCH_AGENT = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.backquant.desktop.plist');
 
 app.setName(APP_NAME);
+// Windows groups notifications and taskbar entries by this id; it must match the
+// installer's shortcut (electron-builder uses build.appId).
+if (IS_WIN) app.setAppUserModelId('com.backquant.desktop');
 
 let mainWindow = null;
 let tray = null;
@@ -145,18 +150,33 @@ function startLoopback() {
 }
 
 // ---------------------------------------------------------------------------
-// Open at login (LaunchAgent, starts hidden in the menu bar)
+// Open at login, starting hidden in the menu bar / tray.
+// macOS: a LaunchAgent (Electron's login-item args are Windows-only).
+// Windows: the Run key, through Electron's login-item settings.
 // ---------------------------------------------------------------------------
 
 /** Login items record the executable path, so only register one from an installed
- *  copy. A run from the dmg or Downloads (App Translocation) would leave a dead path. */
+ *  copy. A run from the dmg or Downloads (App Translocation) would leave a dead path;
+ *  on Windows the installer puts the app in a fixed place. */
 function installedInApplications() {
   const exe = app.getPath('exe');
+  if (IS_WIN) return !/\\Temp\\/i.test(exe);
   return exe.startsWith('/Applications/') || exe.startsWith(path.join(os.homedir(), 'Applications') + '/');
 }
 
 function autostartEnabled() {
+  if (IS_WIN) return app.getLoginItemSettings({ args: [HIDDEN_ARG] }).openAtLogin;
   return fs.existsSync(LAUNCH_AGENT);
+}
+
+function setLoginItem(on) {
+  if (IS_WIN) {
+    app.setLoginItemSettings({ openAtLogin: on, path: process.execPath, args: [HIDDEN_ARG] });
+  } else if (on) {
+    writeLaunchAgent();
+  } else if (fs.existsSync(LAUNCH_AGENT)) {
+    fs.unlinkSync(LAUNCH_AGENT);
+  }
 }
 
 function writeLaunchAgent() {
@@ -180,7 +200,7 @@ function writeLaunchAgent() {
 function syncAutostart() {
   if (readState().autostartOff || !installedInApplications()) return autostartEnabled();
   try {
-    writeLaunchAgent();
+    setLoginItem(true);
   } catch (e) {
     console.error('[backquant] could not register login item:', e);
   }
@@ -190,8 +210,7 @@ function syncAutostart() {
 function setAutostart(on) {
   writeState({ autostartOff: !on });
   try {
-    if (on) writeLaunchAgent();
-    else if (fs.existsSync(LAUNCH_AGENT)) fs.unlinkSync(LAUNCH_AGENT);
+    setLoginItem(on);
   } catch (e) {
     console.error('[backquant] could not change login item:', e);
   }
@@ -209,7 +228,7 @@ async function checkForUpdates({ manual = false } = {}) {
   if (updateDialogOpen) return;
   let update;
   try {
-    update = newerRelease(await fetchLatest(), app.getVersion());
+    update = newerRelease(await fetchLatest(), app.getVersion(), process.platform);
   } catch (e) {
     console.error('[backquant] update check failed:', e.message);
     if (manual) {
@@ -236,8 +255,11 @@ async function checkForUpdates({ manual = false } = {}) {
       type: 'info',
       message: `${APP_NAME} ${update.version} is available`,
       detail:
-        `You have ${app.getVersion()}. Download the new version, then drag it into Applications ` +
-        `to replace this one.${notes}`,
+        `You have ${app.getVersion()}. ` +
+        (IS_WIN
+          ? 'Download the new installer and run it; it replaces this version.'
+          : 'Download the new version, then drag it into Applications to replace this one.') +
+        notes,
       buttons: ['Download', 'Later', 'Skip This Version'],
       defaultId: 0,
       cancelId: 1,
@@ -265,8 +287,49 @@ function autostartItem() {
 
 function rebuildMenus() {
   const nav = (fn) => () => mainWindow && fn(mainWindow.webContents);
+  const viewMenu = {
+    label: 'View',
+    submenu: [
+      { label: 'Back', accelerator: 'CmdOrCtrl+[', click: nav((wc) => wc.navigationHistory.goBack()) },
+      { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: nav((wc) => wc.navigationHistory.goForward()) },
+      { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: nav((wc) => wc.reload()) },
+      { label: 'Terminal Home', accelerator: 'CmdOrCtrl+Shift+H', click: nav((wc) => wc.loadURL(HOME_URL)) },
+      { type: 'separator' },
+      {
+        label: 'Open This Page in Browser',
+        click: nav((wc) => {
+          const url = wc.getURL();
+          if (/^https?:/.test(url)) openExternal(url);
+        }),
+      },
+      { type: 'separator' },
+      { role: 'resetZoom' },
+      { role: 'zoomIn' },
+      { role: 'zoomOut' },
+      { type: 'separator' },
+      { role: 'togglefullscreen' },
+    ],
+  };
+  const helpMenu = { role: 'help', submenu: [{ label: 'BackQuant Documentation', click: () => openExternal(DOCS_URL) }] };
+  // Windows: a plain File menu (the window hides the menu bar; Alt shows it, and the
+  // shortcuts work either way). macOS keeps the standard app menu.
+  const winTemplate = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Check for Updates...', click: () => checkForUpdates({ manual: true }) },
+        { type: 'separator' },
+        autostartItem(),
+        { type: 'separator' },
+        { label: `Quit ${APP_NAME}`, accelerator: 'Ctrl+Q', click: () => app.quit() },
+      ],
+    },
+    { role: 'editMenu' },
+    viewMenu,
+    helpMenu,
+  ];
   Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
+    Menu.buildFromTemplate(IS_WIN ? winTemplate : [
       {
         label: APP_NAME,
         submenu: [
@@ -286,31 +349,9 @@ function rebuildMenus() {
       },
       // The Edit menu is what routes Cmd+C / Cmd+V / Cmd+A into the page on macOS.
       { role: 'editMenu' },
-      {
-        label: 'View',
-        submenu: [
-          { label: 'Back', accelerator: 'CmdOrCtrl+[', click: nav((wc) => wc.navigationHistory.goBack()) },
-          { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: nav((wc) => wc.navigationHistory.goForward()) },
-          { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: nav((wc) => wc.reload()) },
-          { label: 'Terminal Home', accelerator: 'CmdOrCtrl+Shift+H', click: nav((wc) => wc.loadURL(HOME_URL)) },
-          { type: 'separator' },
-          {
-            label: 'Open This Page in Browser',
-            click: nav((wc) => {
-              const url = wc.getURL();
-              if (/^https?:/.test(url)) openExternal(url);
-            }),
-          },
-          { type: 'separator' },
-          { role: 'resetZoom' },
-          { role: 'zoomIn' },
-          { role: 'zoomOut' },
-          { type: 'separator' },
-          { role: 'togglefullscreen' },
-        ],
-      },
+      viewMenu,
       { role: 'windowMenu' },
-      { role: 'help', submenu: [{ label: 'BackQuant Documentation', click: () => openExternal(DOCS_URL) }] },
+      helpMenu,
     ]),
   );
   if (tray) {
@@ -328,9 +369,16 @@ function rebuildMenus() {
 }
 
 function buildTray() {
-  const img = nativeImage.createFromPath(path.join(__dirname, 'trayTemplate.png')).resize({ height: 18 });
-  img.setTemplateImage(true);
-  tray = new Tray(img);
+  if (IS_WIN) {
+    // Colour icon: Windows has no template images, and the tray can be light or dark.
+    tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'tray-win.png')));
+    // Windows convention: left click opens the app, right click shows the menu.
+    tray.on('click', showMain);
+  } else {
+    const img = nativeImage.createFromPath(path.join(__dirname, 'trayTemplate.png')).resize({ height: 18 });
+    img.setTemplateImage(true);
+    tray = new Tray(img);
+  }
   tray.setToolTip(APP_NAME);
 }
 
@@ -343,8 +391,10 @@ function hintStillRunning() {
   if (readState().closeHintShown) return;
   writeState({ closeHintShown: true });
   notify(
-    'Still running in the menu bar',
-    'BackQuant Terminal keeps running so your alerts arrive. Quit from the menu bar icon or with Cmd+Q.',
+    IS_WIN ? 'Still running in the system tray' : 'Still running in the menu bar',
+    IS_WIN
+      ? 'BackQuant Terminal keeps running so your alerts arrive. Quit from the tray icon or with Ctrl+Q.'
+      : 'BackQuant Terminal keeps running so your alerts arrive. Quit from the menu bar icon or with Cmd+Q.',
   );
 }
 
@@ -360,6 +410,8 @@ function createMainWindow(visible) {
     minHeight: 600,
     show: false,
     backgroundColor: '#0b0b0c',
+    // Windows: no menu bar strip over the terminal (Alt brings it back).
+    autoHideMenuBar: IS_WIN,
     webPreferences: {
       contextIsolation: true,
       sandbox: true,

@@ -20,15 +20,17 @@ function compareVersions(a, b) {
   return 0;
 }
 
-/** The newer release, or null. Picks the .dmg asset when there is one so
- *  Download fetches the file directly; otherwise the release page. */
-function newerRelease(release, currentVersion) {
+/** The newer release, or null. Picks this platform's installer (.dmg on macOS,
+ *  .exe on Windows) so Download fetches the file directly; otherwise the release
+ *  page. */
+function newerRelease(release, currentVersion, platform = 'darwin') {
   if (!release || release.draft || release.prerelease || !release.tag_name) return null;
   if (compareVersions(release.tag_name, currentVersion) <= 0) return null;
-  const dmg = (release.assets || []).find((a) => /\.dmg$/i.test(a.name || ''));
+  const ext = platform === 'win32' ? /\.exe$/i : /\.dmg$/i;
+  const installer = (release.assets || []).find((a) => ext.test(a.name || ''));
   return {
     version: String(release.tag_name).replace(/^v/, ''),
-    url: dmg?.browser_download_url || release.html_url || RELEASES_PAGE,
+    url: installer?.browser_download_url || release.html_url || RELEASES_PAGE,
     notes: String(release.body || '').trim(),
   };
 }
