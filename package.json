@@ -1,0 +1,56 @@
+{
+  "name": "backquant-terminal-desktop",
+  "productName": "BackQuant Terminal",
+  "version": "0.3.3",
+  "description": "BackQuant Terminal for macOS (Chromium)",
+  "private": true,
+  "main": "app/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test app/urls.test.js app/update.test.js",
+    "dist": "electron-builder --mac dir --universal && bash build/make-dmg.sh"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "com.backquant.desktop",
+    "productName": "BackQuant Terminal",
+    "copyright": "BackQuant",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "app/**/*",
+      "!app/**/*.test.js"
+    ],
+    "extraResources": [
+      {
+        "from": "build/Assets.car",
+        "to": "Assets.car"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "12.0",
+      "extendInfo": {
+        "CFBundleIconName": "AppIcon"
+      },
+      "artifactName": "BackQuant-Terminal.${ext}"
+    },
+    "afterPack": "build/adhoc-sign.js"
+  }
+}

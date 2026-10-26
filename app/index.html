@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BackQuant Terminal</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0c; color: #e8e8ea;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; cursor: default; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+  img { width: 56px; height: 56px; opacity: .92; }
+  .status { color: #8a8a90; display: flex; align-items: center; gap: 10px; }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #2a2a2e; border-top-color: #e8e8ea;
+    animation: s .8s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  .err { display: none; text-align: center; }
+  .err p { margin: 0 0 12px; color: #b9b9be; }
+  button { background: #1b1b1e; color: #e8e8ea; border: 1px solid #2e2e33; border-radius: 6px;
+    padding: 6px 14px; font: inherit; cursor: pointer; }
+  button:hover { background: #242428; }
+  body.offline .status { display: none; }
+  body.offline .err { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <img src="logo.png" alt="" />
+  <div class="status"><span class="spin"></span><span>Connecting to BackQuant Terminal...</span></div>
+  <div class="err">
+    <p>Can't reach BackQuant. Check your internet connection.</p>
+    <button id="retry">Try again</button>
+  </div>
+</main>
+<script>
+  // Keep in sync with HOME_URL in app/urls.js.
+  const HOME = 'https://terminal.backquant.com/pro';
+  let timer = null;
+
+  async function reachable() {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 8000);
+    try {
+      await fetch('https://terminal.backquant.com/favicon.ico?_=' + Date.now(),
+        { mode: 'no-cors', cache: 'no-store', signal: ctl.signal });
+      return true;
+    } catch { return false; } finally { clearTimeout(t); }
+  }
+
+  async function go() {
+    clearTimeout(timer);
+    document.body.classList.remove('offline');
+    if (await reachable()) { location.replace(HOME); return; }
+    document.body.classList.add('offline');
+    timer = setTimeout(go, 5000);
+  }
+
+  document.getElementById('retry').addEventListener('click', go);
+  window.addEventListener('online', go);
+  go();
+</script>
+</body>
+</html>

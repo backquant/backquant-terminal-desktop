@@ -1,0 +1,115 @@
+<!doctype html>
+<!-- Installer window background (720 x 460), drawn like the TRACE panel: a smooth
+     dealer gamma field (time across, price up; green = positive gamma, red =
+     negative; #00ff00 / #ff0000, the brand's market colours) on black, the Spot line, a price path and the Back∫Quant watermark.
+     Rendered to build/background.png and @2x by render.mjs. make-dmg.sh puts the
+     app at (190, 236) and Applications at (530, 236), 120 px icons; keep in sync.
+     The bright positive core sits behind the icon labels on purpose: on macOS 26
+     Finder draws installer labels in black under a picture, and black reads on
+     the green band. -->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; width: 720px; height: 460px; overflow: hidden; background: #0c0c0e; }
+  canvas { position: absolute; inset: 0; width: 720px; height: 460px; }
+  .watermark {
+    position: absolute; left: 50%; top: 318px; width: 210px; transform: translate(-50%, -50%);
+    opacity: 0.22;
+  }
+  .brand { position: absolute; top: 18px; left: 0; right: 0; text-align: center; }
+  .brand img { width: 54px; height: 54px; display: block; margin: 0 auto; }
+  .brand div {
+    margin-top: 4px; font: 600 15px/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+    color: rgba(255,255,255,0.9);
+  }
+  .spot-label {
+    position: absolute; right: 8px; top: 214px;
+    font: 500 10px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: rgba(255,255,255,0.75);
+  }
+  .arrow { position: absolute; left: 300px; top: 226px; width: 120px; height: 20px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+  .hint {
+    position: absolute; bottom: 24px; left: 0; right: 0; text-align: center;
+    font: 400 11px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: rgba(255,255,255,0.72);
+  }
+  .hint span { color: rgba(255,255,255,0.5); }
+</style>
+</head>
+<body>
+  <canvas id="f" width="1440" height="920"></canvas>
+  <img class="watermark" src="wordmark-white.png" alt="" />
+  <div class="brand"><img src="logo-white.png" alt="" /><div>BackQuant Terminal</div></div>
+  <div class="spot-label">Spot</div>
+  <svg class="arrow" viewBox="0 0 120 20" fill="none">
+    <path d="M2 10 H114" stroke="#fff" stroke-width="2" stroke-linecap="round" />
+    <path d="M106 4 L114 10 L106 16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+  <div class="hint">Drag into Applications, then open it from there.<br /><span>If macOS blocks it: System Settings &gt; Privacy &amp; Security &gt; Open Anyway</span></div>
+
+  <script>
+    // Deterministic synthetic gamma field in the TRACE panel's look.
+    const cv = document.getElementById('f');
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    const base = [12, 12, 14], mint = [0, 255, 0], magenta = [255, 0, 0];
+    const SPOT = 0.487;                                   // icon row (236 / 460 from the top)
+
+    function field(t, y) {
+      // Positive core around spot: flat-topped, narrowing into expiry.
+      const w = 0.27 - 0.08 * t * t;
+      const d = (y - SPOT) / w;
+      let g = Math.exp(-Math.pow(Math.abs(d), 2.4));
+      // Negative walls above and below, strengthening into expiry.
+      const top = (y - (0.86 - 0.05 * t)) / (0.09 + 0.05 * t);
+      const bot = (y - 0.06) / 0.09;
+      g -= (0.35 + 0.45 * t) * Math.exp(-top * top);
+      g -= 0.7 * Math.exp(-bot * bot);
+      // Strike ripples bunch up at expiry, as on the panel's right edge.
+      const e = Math.exp(-Math.pow((1 - t) / 0.1, 2));
+      g += e * 0.9 * Math.sin((y - SPOT) * 38);
+      return Math.max(-1, Math.min(1, g));
+    }
+
+    const img = ctx.createImageData(W, H);
+    for (let px = 0; px < W; px++) {
+      const t = px / W;
+      for (let py = 0; py < H; py++) {
+        const g = field(t, 1 - py / H);
+        const m = Math.pow(Math.abs(g), 0.9);
+        const c = g >= 0 ? mint : magenta;
+        const k = Math.min(1, m) * (g >= 0 ? 0.9 : 0.62);
+        const i = (py * W + px) * 4;
+        img.data[i] = base[0] + (c[0] - base[0]) * k;
+        img.data[i + 1] = base[1] + (c[1] - base[1]) * k;
+        img.data[i + 2] = base[2] + (c[2] - base[2]) * k;
+        img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // Spot line.
+    const spotY = (1 - SPOT) * H;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(0, spotY - 1, W, 2);
+
+    // A fake price path: a seeded random walk (identical on every render) that
+    // wanders inside the positive band and ends on Spot.
+    let seed = 11;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    const pts = [];
+    let y = SPOT + 0.05;
+    for (let px = 0; px <= W * 0.9; px += 6) {
+      const t = px / W;
+      y += (rnd() - 0.5) * 0.022 + (SPOT - y) * (0.015 + 0.08 * t * t);
+      pts.push([px, (1 - y) * H]);
+    }
+    ctx.beginPath();
+    pts.forEach(([x, py], i) => (i ? ctx.lineTo(x, py) : ctx.moveTo(x, py)));
+    ctx.strokeStyle = 'rgba(12,12,14,0.6)';
+    ctx.lineWidth = 1.8;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  </script>
+</body>
+</html>
