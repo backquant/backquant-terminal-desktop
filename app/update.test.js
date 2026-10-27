@@ -45,3 +45,14 @@ test('Windows gets the .exe installer, macOS the .dmg', () => {
 test('a failed check throws instead of reporting up to date', async () => {
   await assert.rejects(fetchLatest(async () => ({ ok: false, status: 404 })), /HTTP 404/);
 });
+
+test('release notes become plain text', () => {
+  const { plainNotes } = require('./update');
+  assert.strictEqual(
+    plainNotes('<h2>New</h2><ul><li>Reloads after a crash</li><li>Updates &amp; restarts</li></ul><p>a &lt;b&gt;</p>'),
+    'New\n- Reloads after a crash\n- Updates & restarts\na <b>',
+  );
+  assert.strictEqual(plainNotes([{ version: '0.3.5', note: '<p>One</p>' }, { version: '0.3.4', note: 'Two' }]), 'One\n\nTwo');
+  assert.strictEqual(plainNotes(null), '');
+  assert.strictEqual(plainNotes('**Plain** markdown'), '**Plain** markdown');
+});

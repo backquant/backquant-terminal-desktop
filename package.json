@@ -1,16 +1,16 @@
 {
   "name": "backquant-terminal-desktop",
   "productName": "BackQuant Terminal",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "BackQuant Terminal",
   "author": "BackQuant",
   "private": true,
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test app/urls.test.js app/update.test.js",
-    "dist": "electron-builder --mac dir --universal && bash build/make-dmg.sh",
-    "dist:win": "electron-builder --win nsis --x64"
+    "test": "node --test app/urls.test.js app/update.test.js app/crash.test.js",
+    "dist": "electron-builder --mac dir --universal --publish never && bash build/make-dmg.sh",
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
   },
   "devDependencies": {
     "electron": "45.0.0",
@@ -34,6 +34,14 @@
       {
         "from": "build/Assets.car",
         "to": "Assets.car"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "backquant",
+        "repo": "backquant-terminal-desktop",
+        "releaseType": "release"
       }
     ],
     "mac": {
@@ -78,5 +86,8 @@
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": false
     }
+  },
+  "dependencies": {
+    "electron-updater": "6.6.2"
   }
 }

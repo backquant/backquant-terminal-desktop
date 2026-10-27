@@ -12,6 +12,8 @@
 //   * site notifications become native notifications
 //   * closing the window keeps the app running in the menu bar / system tray (and optionally at
 //     login) so watch alerts, which arrive over the site's WebSocket, keep coming
+//   * a page that crashes is reloaded (crash.js); Windows installs updates itself,
+//     macOS gets a notice (update.js)
 
 const {
   app,
@@ -37,7 +39,8 @@ const {
   isOAuthAuthorize,
   rewriteRedirect,
 } = require('./urls');
-const { fetchLatest, newerRelease } = require('./update');
+const { afterCrash } = require('./crash');
+const { RELEASES_PAGE, compareVersions, fetchLatest, newerRelease, plainNotes } = require('./update');
 
 const APP_NAME = 'BackQuant Terminal';
 const IS_WIN = process.platform === 'win32';
@@ -218,38 +221,89 @@ function setAutostart(on) {
 }
 
 // ---------------------------------------------------------------------------
-// Update notice (see update.js for why it is a notice, not an auto-update)
+// Updates: Windows installs them, macOS gets a notice (see update.js)
 // ---------------------------------------------------------------------------
 
 const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
-let updateDialogOpen = false;
+// A dialog is open or an update is downloading: no second check meanwhile.
+let updateBusy = false;
+let winUpdater = null;
+
+function windowsUpdater() {
+  if (!winUpdater) {
+    winUpdater = require('electron-updater').autoUpdater;
+    // Nothing downloads or installs until the user says Update Now.
+    winUpdater.autoDownload = false;
+    winUpdater.autoInstallOnAppQuit = false;
+  }
+  return winUpdater;
+}
+
+/** The newer version, or null. Throws when the check itself fails. */
+async function latestUpdate() {
+  if (IS_WIN) {
+    const info = (await windowsUpdater().checkForUpdates())?.updateInfo;
+    if (!info || compareVersions(info.version, app.getVersion()) <= 0) return null;
+    return { version: info.version, url: RELEASES_PAGE, notes: plainNotes(info.releaseNotes) };
+  }
+  return newerRelease(await fetchLatest(), app.getVersion(), process.platform);
+}
+
+/** Windows: download the installer (checked against the release's sha512), run it
+ *  silently and restart. A failure offers the download page instead. */
+async function installWindowsUpdate(update) {
+  const updater = windowsUpdater();
+  const progress = (p) => mainWindow?.setProgressBar(Math.min(1, Math.max(0, (p.percent || 0) / 100)));
+  notify(`Updating ${APP_NAME}`, `Downloading ${update.version}. The app restarts by itself when it is ready.`);
+  updater.on('download-progress', progress);
+  try {
+    await updater.downloadUpdate();
+  } catch (e) {
+    console.error('[backquant] update download failed:', e.message);
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      message: 'Could not install the update',
+      detail: `Download ${APP_NAME} ${update.version} from the release page and run the installer instead.`,
+      buttons: ['Open Download Page', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) openExternal(RELEASES_PAGE);
+    return;
+  } finally {
+    updater.removeListener('download-progress', progress);
+    mainWindow?.setProgressBar(-1);
+  }
+  // Silent install, then start the new version.
+  updater.quitAndInstall(true, true);
+}
 
 async function checkForUpdates({ manual = false } = {}) {
-  if (updateDialogOpen) return;
-  let update;
+  if (updateBusy) return;
+  updateBusy = true;
   try {
-    update = newerRelease(await fetchLatest(), app.getVersion(), process.platform);
-  } catch (e) {
-    console.error('[backquant] update check failed:', e.message);
-    if (manual) {
-      dialog.showMessageBox({
-        type: 'warning',
-        message: 'Could not check for updates',
-        detail: 'Check your internet connection and try again.',
-      });
+    let update;
+    try {
+      update = await latestUpdate();
+    } catch (e) {
+      console.error('[backquant] update check failed:', e.message);
+      if (manual) {
+        await dialog.showMessageBox({
+          type: 'warning',
+          message: 'Could not check for updates',
+          detail: 'Check your internet connection and try again.',
+        });
+      }
+      return;
     }
-    return;
-  }
-  if (!update) {
-    if (manual) {
-      dialog.showMessageBox({ type: 'info', message: `You're up to date`, detail: `${APP_NAME} ${app.getVersion()} is the latest version.` });
+    if (!update) {
+      if (manual) {
+        await dialog.showMessageBox({ type: 'info', message: `You're up to date`, detail: `${APP_NAME} ${app.getVersion()} is the latest version.` });
+      }
+      return;
     }
-    return;
-  }
-  // A skipped version stays quiet until the user checks by hand.
-  if (!manual && readState().skippedVersion === update.version) return;
-  updateDialogOpen = true;
-  try {
+    // A skipped version stays quiet until the user checks by hand.
+    if (!manual && readState().skippedVersion === update.version) return;
     const notes = update.notes ? `\n\n${update.notes.slice(0, 600)}` : '';
     const { response } = await dialog.showMessageBox({
       type: 'info',
@@ -257,17 +311,21 @@ async function checkForUpdates({ manual = false } = {}) {
       detail:
         `You have ${app.getVersion()}. ` +
         (IS_WIN
-          ? 'Download the new installer and run it; it replaces this version.'
+          ? 'Update Now downloads it, installs it and restarts the app, in about a minute.'
           : 'Download the new version, then drag it into Applications to replace this one.') +
         notes,
-      buttons: ['Download', 'Later', 'Skip This Version'],
+      buttons: [IS_WIN ? 'Update Now' : 'Download', 'Later', 'Skip This Version'],
       defaultId: 0,
       cancelId: 1,
     });
-    if (response === 0) openExternal(update.url);
-    else if (response === 2) writeState({ skippedVersion: update.version });
+    if (response === 0) {
+      if (IS_WIN) await installWindowsUpdate(update);
+      else openExternal(update.url);
+    } else if (response === 2) {
+      writeState({ skippedVersion: update.version });
+    }
   } finally {
-    updateDialogOpen = false;
+    updateBusy = false;
   }
 }
 
@@ -477,6 +535,29 @@ function createMainWindow(visible) {
     }
     openExternal(url);
     return { action: 'deny' };
+  });
+
+  // A page process that dies leaves a blank window: reload it (see crash.js).
+  let crashes = [];
+  wc.on('render-process-gone', (_e, details) => {
+    const out = afterCrash(details.reason, crashes, Date.now());
+    crashes = out.recent;
+    if (out.action === 'ignore' || win.isDestroyed()) return;
+    console.error(`[backquant] page process gone (${details.reason}, exit ${details.exitCode}): ${out.action}`);
+    if (out.action === 'reload') {
+      wc.reload();
+      notify(`${APP_NAME} reloaded`, 'The terminal stopped unexpectedly, so the app reloaded it.');
+    } else {
+      win.loadFile(path.join(__dirname, 'index.html'), { hash: 'crashed' });
+      showMain();
+    }
+  });
+  // Pop-out panels are drawn by the main page; once their page process is gone they
+  // have nothing left to show.
+  wc.on('did-create-window', (child) => {
+    child.webContents.on('render-process-gone', (_e, details) => {
+      if (details.reason !== 'clean-exit' && !child.isDestroyed()) child.close();
+    });
   });
 
   win.loadFile(path.join(__dirname, 'index.html'));

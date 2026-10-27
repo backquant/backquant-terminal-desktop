@@ -14,7 +14,9 @@ on BackQuant's servers; nothing runs locally.
 - **Sign in as usual.** Email, Google, GitHub or Discord. Social sign-in opens in your
   default browser and returns to the app.
 - **Pop-out panels** open as real windows; **downloads** go to your Downloads folder.
-- **Update notice.** When a new version of the app is out, it tells you.
+- **Updates.** When a new version is out, it tells you. On Windows, Update Now installs it
+  and restarts the app; on macOS it opens the download.
+- **Crash recovery.** If the terminal page stops unexpectedly, the app reloads it.
 
 ## Install
 
@@ -49,6 +51,11 @@ npm run dist:win   # on Windows:   release/BackQuant-Terminal-Setup.exe
 `build/make-dmg.sh` packs it into the installer, letting Finder lay out the window designed
 in `build/dmg-design/background.html` (re-render with `node build/dmg-design/render.mjs`).
 The app is ad-hoc signed by `build/after-pack.js`.
+
+**Releases:** tag `vX.Y.Z` and upload `BackQuant-Terminal.dmg`, `BackQuant-Terminal-Setup.exe`,
+its `.blockmap` and `latest.yml` (all from `release/`). Windows updates itself from
+`latest.yml`, which carries the installer's checksum: a release without it is invisible
+to the Windows app.
 
 **Windows:** build the installer on Windows (the NSIS installer compiler does not run on
 Apple Silicon). `build/after-pack.js` stamps the app's icon and version details into

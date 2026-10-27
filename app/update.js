@@ -1,7 +1,9 @@
-// Update notice. An unsigned Mac app cannot update itself (Apple's updater only
-// accepts signed bundles), so the shell checks GitHub for a newer release and
-// offers to open its download. Site changes never need this: the terminal itself
-// loads from the web on every launch and reload.
+// Updates. Windows installs them itself through electron-updater (main.js): the
+// installer is checked against the sha512 in the release's latest.yml, run silently,
+// and the app restarts. An unsigned Mac app cannot update itself (Apple's updater
+// only accepts signed bundles), so on macOS the shell checks GitHub for a newer
+// release and offers to open its download. Site changes never need either: the
+// terminal itself loads from the web on every launch and reload.
 //
 // Until a release is published GitHub answers 404, which the check treats as a
 // failed check and stays quiet.
@@ -44,4 +46,21 @@ async function fetchLatest(fetchImpl = fetch) {
   return res.json();
 }
 
-module.exports = { RELEASES_API, RELEASES_PAGE, compareVersions, newerRelease, fetchLatest };
+/** Release notes as plain text for a dialog. electron-updater hands over GitHub's
+ *  rendered HTML (or a list of notes per version); the Mac check, markdown. */
+function plainNotes(notes) {
+  const text = Array.isArray(notes) ? notes.map((n) => n?.note ?? '').join('\n') : String(notes ?? '');
+  return text
+    .replace(/<\/(p|li|h[1-6]|div)>|<br\s*\/?>/gi, '\n')
+    .replace(/<li>/gi, '- ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+module.exports = { RELEASES_API, RELEASES_PAGE, compareVersions, newerRelease, fetchLatest, plainNotes };

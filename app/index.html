@@ -19,17 +19,21 @@
   button { background: #1b1b1e; color: #e8e8ea; border: 1px solid #2e2e33; border-radius: 6px;
     padding: 6px 14px; font: inherit; cursor: pointer; }
   button:hover { background: #242428; }
-  body.offline .status { display: none; }
-  body.offline .err { display: block; }
+  body.offline .status, body.crashed .status { display: none; }
+  body.offline .err.net, body.crashed .err.crash { display: block; }
 </style>
 </head>
 <body>
 <main>
   <img src="logo.png" alt="" />
   <div class="status"><span class="spin"></span><span>Connecting to BackQuant Terminal...</span></div>
-  <div class="err">
+  <div class="err net">
     <p>Can't reach BackQuant. Check your internet connection.</p>
     <button id="retry">Try again</button>
+  </div>
+  <div class="err crash">
+    <p>The terminal stopped unexpectedly several times in a row.</p>
+    <button id="restart">Try again</button>
   </div>
 </main>
 <script>
@@ -49,15 +53,22 @@
 
   async function go() {
     clearTimeout(timer);
-    document.body.classList.remove('offline');
+    document.body.classList.remove('offline', 'crashed');
     if (await reachable()) { location.replace(HOME); return; }
     document.body.classList.add('offline');
     timer = setTimeout(go, 5000);
   }
 
   document.getElementById('retry').addEventListener('click', go);
-  window.addEventListener('online', go);
-  go();
+  document.getElementById('restart').addEventListener('click', go);
+  // The app opens this page at #crashed when the terminal keeps crashing
+  // (app/crash.js): wait for the user instead of loading it again.
+  if (location.hash === '#crashed') {
+    document.body.classList.add('crashed');
+  } else {
+    window.addEventListener('online', go);
+    go();
+  }
 </script>
 </body>
 </html>
