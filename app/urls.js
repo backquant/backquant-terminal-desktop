@@ -39,24 +39,34 @@ function allowedInApp(url) {
   return IN_APP_DOMAINS.some((d) => hostMatches(u.hostname, d));
 }
 
-/** OAuth authorize request, e.g.
+// Our Supabase auth host: only its authorize requests are sent to the browser with
+// the loopback as redirect_to.
+const AUTH_HOST = 'auth.backquant.com';
+
+/** OAuth authorize request on our auth host, e.g.
  *  https://auth.backquant.com/auth/v1/authorize?provider=google&redirect_to=... */
 function isOAuthAuthorize(url) {
   const u = parse(url);
-  return !!u && u.pathname === '/auth/v1/authorize' && u.searchParams.has('provider');
+  return !!u && u.protocol === 'https:' && u.hostname === AUTH_HOST
+    && u.pathname === '/auth/v1/authorize' && u.searchParams.has('provider');
 }
 
-/** Swap redirect_to for the loopback callback, keeping every other parameter
- *  (notably the PKCE code_challenge, whose verifier lives in this window's storage).
+/** Swap redirect_to for the loopback callback carrying this sign-in's nonce (`s`),
+ *  keeping every other parameter (notably the PKCE code_challenge, whose verifier
+ *  lives in this window's storage). Supabase returns to exactly that address, so
+ *  only the browser that ran this sign-in knows the nonce (see callback.js).
  *  Returns the browser URL and the original redirect_to (or null). */
-function rewriteRedirect(url) {
+function rewriteRedirect(url, nonce) {
   const u = new URL(url);
   const original = u.searchParams.get('redirect_to');
-  u.searchParams.set('redirect_to', LOOPBACK_CALLBACK);
+  const back = new URL(LOOPBACK_CALLBACK);
+  back.searchParams.set('s', nonce);
+  u.searchParams.set('redirect_to', back.toString());
   return { browserUrl: u.toString(), original: original && parse(original) ? original : null };
 }
 
 module.exports = {
+  AUTH_HOST,
   HOME_URL,
   DOCS_URL,
   LOOPBACK_PORT,

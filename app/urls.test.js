@@ -8,10 +8,10 @@ test('oauth authorize is detected and rewritten', () => {
     '&redirect_to=https%3A%2F%2Fterminal.backquant.com%2Fauth%2Fredirect' +
     '&code_challenge=abc&code_challenge_method=s256';
   assert.ok(isOAuthAuthorize(u));
-  const { browserUrl, original } = rewriteRedirect(u);
+  const { browserUrl, original } = rewriteRedirect(u, 'N0NCE_abc-123');
   assert.strictEqual(original, 'https://terminal.backquant.com/auth/redirect');
   const q = new URL(browserUrl).searchParams;
-  assert.strictEqual(q.get('redirect_to'), LOOPBACK_CALLBACK);
+  assert.strictEqual(q.get('redirect_to'), `${LOOPBACK_CALLBACK}?s=N0NCE_abc-123`);
   assert.strictEqual(q.get('code_challenge'), 'abc');
   assert.strictEqual(q.get('provider'), 'google');
 });
@@ -21,6 +21,10 @@ test('every provider goes through the browser', () => {
     assert.ok(isOAuthAuthorize(`https://auth.backquant.com/auth/v1/authorize?provider=${p}`), p);
   }
   assert.ok(!isOAuthAuthorize('https://auth.backquant.com/auth/v1/token?grant_type=pkce'));
+  // Only our auth host, over https: another host's authorize path is not rewritten.
+  assert.ok(!isOAuthAuthorize('https://evil.example/auth/v1/authorize?provider=google'));
+  assert.ok(!isOAuthAuthorize('http://auth.backquant.com/auth/v1/authorize?provider=google'));
+  assert.ok(!isOAuthAuthorize('https://auth.backquant.com.evil.example/auth/v1/authorize?provider=google'));
 });
 
 test('in-app hosts', () => {

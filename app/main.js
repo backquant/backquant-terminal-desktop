@@ -45,12 +45,18 @@ const {
   LOOPBACK_ORIGIN,
   MAX_FRAGMENT_BYTES,
   PICKUP_SCRIPT,
+  SECURITY_HEADERS,
   deliverable,
   fragmentPostAllowed,
   fromFragment,
   fromQuery,
+  hostAllowed,
+  newPending,
+  parsePost,
+  pendingLive,
+  pendingMatches,
+  withCode,
   withFragment,
-  withQuery,
 } = require('./callback');
 const { afterCrash } = require('./crash');
 const { RELEASES_PAGE, compareVersions, fetchLatest, newerRelease, plainNotes } = require('./update');
@@ -70,8 +76,8 @@ let mainWindow = null;
 let tray = null;
 let quitting = false;
 let loopbackOk = false;
-// Original redirect_to of the sign-in in flight (where the code must be delivered).
-let pendingRedirect = null;
+// The sign-in in flight: { dest (the original redirect_to), nonce, at } (callback.js).
+let pending = null;
 
 // ---------------------------------------------------------------------------
 // Small persisted state (window bounds, opt-outs)
@@ -102,8 +108,18 @@ function writeState(patch) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** A URL for the log: origin and path only, never its query or fragment (tokens, codes). */
+function forLog(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return '(unparsable url)';
+  }
+}
+
 function openExternal(url) {
-  shell.openExternal(url).catch((e) => console.error(`[backquant] could not open ${url}:`, e));
+  shell.openExternal(url).catch((e) => console.error(`[backquant] could not open ${forLog(url)}:`, e.message));
 }
 
 function notify(title, body) {
@@ -161,20 +177,23 @@ function signInFailed(message) {
   showMain();
 }
 
-/** The request body as text, or null past `limit` bytes. */
+/** The request body as text, or null past `limit` bytes (the rest is not read; the
+ *  caller answers and the connection is closed after the answer). */
 function readBody(req, limit) {
   return new Promise((resolve) => {
     let size = 0;
     const parts = [];
-    req.on('data', (c) => {
+    const onData = (c) => {
       size += c.length;
       if (size > limit) {
+        req.off('data', onData);
+        req.pause();
         resolve(null);
-        req.destroy();
       } else {
         parts.push(c);
       }
-    });
+    };
+    req.on('data', onData);
     req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
     req.on('error', () => resolve(null));
   });
@@ -184,25 +203,36 @@ function startLoopback() {
   return new Promise((resolve) => {
     const server = http.createServer(async (req, res) => {
       const send = (status, [title, body = ''], script = '') => {
-        res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8' });
         res.end(page(title, body, script));
       };
-      const answer = (status, [title, body = '']) => {
-        res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      const answer = (status, [title, body = ''], close = false) => {
+        res.writeHead(status, {
+          ...SECURITY_HEADERS, 'Content-Type': 'application/json', ...(close ? { Connection: 'close' } : {}),
+        });
         res.end(JSON.stringify({ title, body }));
+        if (close) res.on('finish', () => req.destroy());
       };
+      // Addressed to the loopback by its own name only (DNS rebinding gets nothing).
+      if (!hostAllowed(req.headers.host)) {
+        res.writeHead(421, SECURITY_HEADERS);
+        return res.end();
+      }
+      if (pending && !pendingLive(pending)) pending = null;     // expired
       const cb = new URL(req.url || '/', LOOPBACK_ORIGIN);
 
       // The callback page posting its fragment back (an implicit sign-in, see callback.js).
       if (cb.pathname === FRAGMENT_PATH) {
         if (!fragmentPostAllowed(req.method, req.headers.origin)) return answer(403, ['Not allowed']);
         const text = await readBody(req, MAX_FRAGMENT_BYTES);
-        if (text == null) return answer(413, INCOMPLETE);
-        if (!pendingRedirect) return answer(200, NO_SIGN_IN);
-        const got = fromFragment(text);
+        if (text == null) return answer(413, INCOMPLETE, true);
+        const post = parsePost(text);
+        // Not this sign-in's nonce: nothing is delivered and the real sign-in keeps waiting.
+        if (!post || !pendingMatches(pending, post.nonce)) return answer(200, NO_SIGN_IN);
+        const got = fromFragment(post.fragment);
         if (got.kind === 'none') return answer(200, INCOMPLETE);
-        const dest = pendingRedirect;
-        pendingRedirect = null;
+        const { dest } = pending;
+        pending = null;
         if (got.kind === 'error') {
           answer(200, failed(got.message));
           return signInFailed(got.message);
@@ -212,19 +242,21 @@ function startLoopback() {
       }
 
       if (cb.pathname !== CALLBACK_PATH) return send(404, ['Not found']);
-      if (!pendingRedirect) return send(200, NO_SIGN_IN);
+      if (req.method !== 'GET') return send(405, ['Not allowed']);
+      // Not this sign-in's nonce (or none waiting): nothing is cancelled or delivered.
+      if (!pendingMatches(pending, cb.searchParams.get('s'))) return send(200, NO_SIGN_IN, PICKUP_SCRIPT);
       const got = fromQuery(cb.searchParams);
       // Nothing in the query: the result may be in the fragment, which only the page
-      // can read. The sign-in stays pending for it.
+      // can read. The sign-in stays waiting for it.
       if (got.kind === 'none') return send(200, INCOMPLETE, PICKUP_SCRIPT);
-      const dest = pendingRedirect;
-      pendingRedirect = null;
+      const { dest } = pending;
+      pending = null;
       if (got.kind === 'error') {
         send(200, failed(got.message));
         return signInFailed(got.message);
       }
       send(200, SIGNED_IN);
-      deliverSignIn(withQuery(dest, cb.searchParams));
+      deliverSignIn(withCode(dest, got.code));
     });
     server.once('error', (e) => {
       console.error(`[backquant] port ${LOOPBACK_PORT} unavailable, OAuth sign-in stays in-window:`, e.message);
@@ -593,8 +625,10 @@ function createMainWindow(visible) {
   const guard = (e, url) => {
     if (isOAuthAuthorize(url) && loopbackOk) {
       e.preventDefault();
-      const { browserUrl, original } = rewriteRedirect(url);
-      pendingRedirect = original ?? HOME_URL;
+      const next = newPending(null);
+      const { browserUrl, original } = rewriteRedirect(url, next.nonce);
+      next.dest = original ?? HOME_URL;
+      pending = next;          // a new sign-in replaces any older one still waiting
       openExternal(browserUrl);
       return;
     }
