@@ -4,8 +4,10 @@ const crypto = require('node:crypto');
 const {
   LOOPBACK_ORIGIN,
   MAX_FRAGMENT_BYTES,
+  MAX_PENDING,
   PENDING_TTL_MS,
   PICKUP_SCRIPT,
+  PendingSignIns,
   FRAGMENT_PATH,
   SECURITY_HEADERS,
   deliverable,
@@ -14,10 +16,7 @@ const {
   fromQuery,
   hostAllowed,
   newNonce,
-  newPending,
   parsePost,
-  pendingLive,
-  pendingMatches,
   withCode,
   withFragment,
 } = require('./callback');
@@ -82,34 +81,60 @@ test('each sign-in gets its own unguessable nonce', () => {
   for (const n of seen) assert.match(n, /^[A-Za-z0-9_-]{32}$/);
 });
 
-test('only the waiting sign-in\'s own nonce matches, and only until it expires', () => {
+test('only a waiting sign-in\'s own nonce matches, and only until it expires', () => {
   const t = 1_000_000;
-  const p = newPending('https://www.backquant.com/auth/redirect', t);
-  assert.ok(pendingMatches(p, p.nonce, t + 1000));
-  assert.ok(!pendingMatches(p, newNonce(), t + 1000));                 // another nonce
-  assert.ok(!pendingMatches(p, p.nonce.slice(0, -1), t + 1000));       // a prefix
-  assert.ok(!pendingMatches(p, '', t + 1000));
-  assert.ok(!pendingMatches(p, undefined, t + 1000));
-  assert.ok(!pendingMatches(null, p.nonce, t + 1000));                  // nothing waiting
-  assert.ok(pendingLive(p, t + PENDING_TTL_MS));
-  assert.ok(!pendingLive(p, t + PENDING_TTL_MS + 1));
-  assert.ok(!pendingMatches(p, p.nonce, t + PENDING_TTL_MS + 1));       // expired
+  const ps = new PendingSignIns();
+  const n = newNonce();
+  ps.add(n, 'https://www.backquant.com/auth/redirect', t);
+  assert.strictEqual(ps.find(n, t + 1000).dest, 'https://www.backquant.com/auth/redirect');
+  assert.strictEqual(ps.find(newNonce(), t + 1000), null);              // another nonce
+  assert.strictEqual(ps.find(n.slice(0, -1), t + 1000), null);          // a prefix
+  assert.strictEqual(ps.find('', t + 1000), null);
+  assert.strictEqual(ps.find(undefined, t + 1000), null);
+  assert.ok(ps.find(n, t + PENDING_TTL_MS));
+  assert.strictEqual(ps.find(n, t + PENDING_TTL_MS + 1), null);         // expired
+  assert.strictEqual(ps.size, 0);
 });
 
-test('forged-fragment race: a page that opens the loopback cannot win without the nonce', () => {
+test('a double click: both sign-ins wait, either may finish, at most MAX_PENDING', () => {
+  const t = 2_000_000;
+  const ps = new PendingSignIns();
+  const a = newNonce(); const b = newNonce();
+  ps.add(a, 'https://terminal.backquant.com/auth/redirect', t);
+  ps.add(b, 'https://terminal.backquant.com/auth/redirect', t + 500);
+  assert.ok(ps.find(a, t + 1000) && ps.find(b, t + 1000));
+  ps.remove(a);                                                          // the first one failed
+  assert.strictEqual(ps.find(a, t + 1000), null);
+  assert.ok(ps.find(b, t + 1000));                                       // the other still waits
+  ps.clear();                                                            // one finished
+  assert.strictEqual(ps.size, 0);
+  const many = Array.from({ length: MAX_PENDING + 2 }, (_, i) => { const x = newNonce(); ps.add(x, 'https://www.backquant.com/auth/redirect', t + i); return x; });
+  assert.strictEqual(ps.size, MAX_PENDING);
+  assert.strictEqual(ps.find(many[0], t + 10), null);                    // the oldest dropped
+  assert.ok(ps.find(many[many.length - 1], t + 10));
+  // Each keeps its own TTL.
+  const ps2 = new PendingSignIns();
+  const old = newNonce(); const young = newNonce();
+  ps2.add(old, 'https://www.backquant.com/auth/redirect', t);
+  ps2.add(young, 'https://www.backquant.com/auth/redirect', t + 60_000);
+  assert.strictEqual(ps2.find(old, t + PENDING_TTL_MS + 1), null);
+  assert.ok(ps2.find(young, t + PENDING_TTL_MS + 1));
+});
+
+test('forged-fragment race: a page that opens the loopback cannot win without a nonce', () => {
   // The attack: while a sign-in waits, another site opens
   // 127.0.0.1:47821/callback#access_token=ATK&refresh_token=ATK, again and again. Our
   // pickup page runs and posts from the loopback origin (so the Origin check passes),
   // but the nonce it sends is whatever the attacker put in the address: never ours.
-  const p = newPending('https://www.backquant.com/auth/redirect');
+  const ps = new PendingSignIns();
+  const real = newNonce();
+  ps.add(real, 'https://www.backquant.com/auth/redirect');
   assert.ok(fragmentPostAllowed('POST', LOOPBACK_ORIGIN));
   for (let i = 0; i < 1000; i++) {
     const forged = parsePost(JSON.stringify({ s: i % 2 ? '' : newNonce(), fragment: 'access_token=ATK&refresh_token=ATK' }));
-    assert.ok(!pendingMatches(p, forged.nonce));
+    assert.strictEqual(ps.find(forged.nonce), null);
   }
-  const real = parsePost(JSON.stringify({ s: p.nonce, fragment: 'access_token=AT&refresh_token=RT' }));
-  assert.ok(pendingMatches(p, real.nonce));
-  assert.strictEqual(fromFragment(real.fragment).kind, 'session');
+  assert.ok(ps.find(real));
 });
 
 test('the fragment post body is { s, fragment } and nothing else', () => {
@@ -136,7 +161,7 @@ test('only requests addressed to 127.0.0.1:47821 are served (DNS rebinding)', ()
   }
 });
 
-test('the result is delivered only over https to backquant.com, www and the terminal', () => {
+test('the result is delivered only over https to the sign-in return page of backquant.com, www and the terminal', () => {
   for (const ok of [
     'https://www.backquant.com/auth/redirect#access_token=AT',
     'https://backquant.com/auth/redirect',
@@ -144,14 +169,17 @@ test('the result is delivered only over https to backquant.com, www and the term
   ]) assert.ok(deliverable(ok), ok);
   for (const bad of [
     'http://terminal.backquant.com/auth/redirect',       // plain http
-    'https://github.com/x#access_token=AT',              // in-app, but not ours
-    'https://checkout.stripe.com/x',
-    'https://nowpayments.io/x',
-    'https://evil.backquant.com/x',                      // another subdomain
-    'https://backquant.com.evil.example/x',
-    'https://user:pw@terminal.backquant.com/x',
-    'https://terminal.backquant.com:8443/x',
-    'https://evil.example/steal#access_token=AT',
+    'https://terminal.backquant.com/pro',                 // our host, not the return page
+    'https://www.backquant.com/go?to=https://evil.example', // an open redirect elsewhere
+    'https://www.backquant.com/auth/redirect/../x',
+    'https://www.backquant.com/auth/redirectx',
+    'https://github.com/auth/redirect#access_token=AT',  // in-app, but not ours
+    'https://checkout.stripe.com/auth/redirect',
+    'https://evil.backquant.com/auth/redirect',          // another subdomain
+    'https://backquant.com.evil.example/auth/redirect',
+    'https://user:pw@terminal.backquant.com/auth/redirect',
+    'https://terminal.backquant.com:8443/auth/redirect',
+    'https://evil.example/auth/redirect#access_token=AT',
     'file:///etc/passwd',
     'javascript:alert(1)',
     'not a url',
