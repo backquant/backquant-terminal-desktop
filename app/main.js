@@ -39,6 +39,19 @@ const {
   isOAuthAuthorize,
   rewriteRedirect,
 } = require('./urls');
+const {
+  CALLBACK_PATH,
+  FRAGMENT_PATH,
+  LOOPBACK_ORIGIN,
+  MAX_FRAGMENT_BYTES,
+  PICKUP_SCRIPT,
+  deliverable,
+  fragmentPostAllowed,
+  fromFragment,
+  fromQuery,
+  withFragment,
+  withQuery,
+} = require('./callback');
 const { afterCrash } = require('./crash');
 const { RELEASES_PAGE, compareVersions, fetchLatest, newerRelease, plainNotes } = require('./update');
 
@@ -112,37 +125,106 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function page(title, body) {
+function page(title, body, script = '') {
   return (
     '<!doctype html><html><head><meta charset="utf-8"><title>BackQuant Terminal</title><style>' +
     'html,body{margin:0;height:100%;background:#0b0b0c;color:#e8e8ea;' +
     'font:14px/1.5 -apple-system,BlinkMacSystemFont,system-ui,sans-serif}' +
     'main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}' +
     'h1{font-size:16px;font-weight:600;margin:0}p{margin:0;color:#8a8a90}' +
-    `</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p></main></body></html>`
+    `</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p></main>` +
+    (script ? `<script>${script}</script>` : '') +
+    '</body></html>'
   );
+}
+
+const SIGNED_IN = ['Signed in', 'You can close this tab and return to BackQuant Terminal.'];
+const NO_SIGN_IN = ['No sign-in in progress', 'Open BackQuant Terminal and sign in again.'];
+const INCOMPLETE = ['Sign-in incomplete', 'Return to BackQuant Terminal and try again.'];
+const failed = (message) => ['Sign-in failed', `${message}. Return to BackQuant Terminal and try again.`];
+
+/** Open the sign-in's result in the window: the original redirect_to, which finishes it. */
+function deliverSignIn(url) {
+  if (!deliverable(url)) {
+    console.error('[backquant] sign-in result not delivered: redirect_to is not one of the app\'s pages');
+    if (mainWindow) mainWindow.loadURL(HOME_URL);
+  } else if (mainWindow) {
+    mainWindow.loadURL(url);
+  }
+  showMain();
+}
+
+/** The browser said no: say so in the app too, not only in a browser tab. */
+function signInFailed(message) {
+  console.error(`[backquant] sign-in failed: ${message}`);
+  notify('Sign-in failed', message);
+  showMain();
+}
+
+/** The request body as text, or null past `limit` bytes. */
+function readBody(req, limit) {
+  return new Promise((resolve) => {
+    let size = 0;
+    const parts = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        resolve(null);
+        req.destroy();
+      } else {
+        parts.push(c);
+      }
+    });
+    req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
+    req.on('error', () => resolve(null));
+  });
 }
 
 function startLoopback() {
   return new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      const send = (status, title, body = '') => {
+    const server = http.createServer(async (req, res) => {
+      const send = (status, [title, body = ''], script = '') => {
         res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(page(title, body));
+        res.end(page(title, body, script));
       };
-      const cb = new URL(req.url || '/', 'http://127.0.0.1');
-      if (cb.pathname !== '/callback') return send(404, 'Not found');
+      const answer = (status, [title, body = '']) => {
+        res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ title, body }));
+      };
+      const cb = new URL(req.url || '/', LOOPBACK_ORIGIN);
+
+      // The callback page posting its fragment back (an implicit sign-in, see callback.js).
+      if (cb.pathname === FRAGMENT_PATH) {
+        if (!fragmentPostAllowed(req.method, req.headers.origin)) return answer(403, ['Not allowed']);
+        const text = await readBody(req, MAX_FRAGMENT_BYTES);
+        if (text == null) return answer(413, INCOMPLETE);
+        if (!pendingRedirect) return answer(200, NO_SIGN_IN);
+        const got = fromFragment(text);
+        if (got.kind === 'none') return answer(200, INCOMPLETE);
+        const dest = pendingRedirect;
+        pendingRedirect = null;
+        if (got.kind === 'error') {
+          answer(200, failed(got.message));
+          return signInFailed(got.message);
+        }
+        answer(200, SIGNED_IN);
+        return deliverSignIn(withFragment(dest, got.fragment));
+      }
+
+      if (cb.pathname !== CALLBACK_PATH) return send(404, ['Not found']);
+      if (!pendingRedirect) return send(200, NO_SIGN_IN);
+      const got = fromQuery(cb.searchParams);
+      // Nothing in the query: the result may be in the fragment, which only the page
+      // can read. The sign-in stays pending for it.
+      if (got.kind === 'none') return send(200, INCOMPLETE, PICKUP_SCRIPT);
       const dest = pendingRedirect;
       pendingRedirect = null;
-      if (!dest) return send(200, 'No sign-in in progress', 'Open BackQuant Terminal and sign in again.');
-      const err = cb.searchParams.get('error_description') || cb.searchParams.get('error');
-      if (err) return send(200, 'Sign-in failed', `${err}. Return to BackQuant Terminal and try again.`);
-      if (!cb.searchParams.has('code')) return send(200, 'Sign-in incomplete', 'Return to BackQuant Terminal and try again.');
-      const target = new URL(dest);
-      for (const [k, v] of cb.searchParams) target.searchParams.append(k, v);
-      send(200, 'Signed in', 'You can close this tab and return to BackQuant Terminal.');
-      if (mainWindow) mainWindow.loadURL(target.toString());
-      showMain();
+      if (got.kind === 'error') {
+        send(200, failed(got.message));
+        return signInFailed(got.message);
+      }
+      send(200, SIGNED_IN);
+      deliverSignIn(withQuery(dest, cb.searchParams));
     });
     server.once('error', (e) => {
       console.error(`[backquant] port ${LOOPBACK_PORT} unavailable, OAuth sign-in stays in-window:`, e.message);

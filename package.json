@@ -1,14 +1,14 @@
 {
   "name": "backquant-terminal-desktop",
   "productName": "BackQuant Terminal",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "BackQuant Terminal",
   "author": "BackQuant",
   "private": true,
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test app/urls.test.js app/update.test.js app/crash.test.js",
+    "test": "node --test app/urls.test.js app/update.test.js app/crash.test.js app/callback.test.js",
     "dist": "electron-builder --mac dir --universal --publish never && bash build/make-dmg.sh",
     "dist:win": "electron-builder --win nsis --x64 --publish never"
   },
