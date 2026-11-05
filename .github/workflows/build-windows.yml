@@ -1,0 +1,52 @@
+name: Build Windows installer
+
+# Builds the NSIS installer on Windows (it does not build on a Mac) and attaches
+# it, its blockmap and latest.yml to the release for the given tag. Run it from
+# the Actions tab once the tag and the release (a draft is fine) exist.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build, for example v0.3.5"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Check the version matches the tag
+        shell: bash
+        run: |
+          v="v$(node -p "require('./package.json').version")"
+          if [ "$v" != "$TAG" ]; then echo "package.json says $v, the tag is $TAG"; exit 1; fi
+
+      - run: npm run dist:win
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            release/BackQuant-Terminal-Setup.exe \
+            release/BackQuant-Terminal-Setup.exe.blockmap \
+            release/latest.yml \
+            --clobber --repo "$GITHUB_REPOSITORY"

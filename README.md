@@ -58,7 +58,9 @@ its `.blockmap` and `latest.yml` (all from `release/`). Windows updates itself f
 to the Windows app.
 
 **Windows:** build the installer on Windows (the NSIS installer compiler does not run on
-Apple Silicon). `build/after-pack.js` stamps the app's icon and version details into
+Apple Silicon), or run the **Build Windows installer** workflow in the Actions tab with the
+release tag: it builds on a Windows runner and attaches the installer, its `.blockmap` and
+`latest.yml` to that release. `build/after-pack.js` stamps the app's icon and version details into
 `BackQuant Terminal.exe`. On a Mac you can still build a portable zip of the Windows app:
 `npx electron-builder --win zip --x64`.
 
