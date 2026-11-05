@@ -28,7 +28,10 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      # The lock file is made on a Mac, so it can lack the Windows-only optional
+      # packages electron-builder needs here; npm install keeps every locked
+      # version and adds those.
+      - run: npm ci || npm install --no-audit --no-fund
 
       - run: npm test
 
