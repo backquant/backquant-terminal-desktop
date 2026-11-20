@@ -14,6 +14,8 @@
 //     login) so watch alerts, which arrive over the site's WebSocket, keep coming
 //   * a page that crashes is reloaded (crash.js); Windows installs updates itself,
 //     macOS gets a notice (update.js)
+//   * freezes and crashed processes are logged, with memory every few minutes, and
+//     Help > Save Diagnostics writes it all to one file to send us (diag.js)
 
 const {
   app,
@@ -41,6 +43,7 @@ const {
 } = require('./urls');
 const { PendingSignIns, createHandler, newNonce } = require('./callback');
 const { afterCrash } = require('./crash');
+const { DiagLog, durationText, summarizeMetrics } = require('./diag');
 const { RELEASES_PAGE, compareVersions, fetchLatest, newerRelease, plainNotes } = require('./update');
 
 const APP_NAME = 'BackQuant Terminal';
@@ -53,6 +56,13 @@ app.setName(APP_NAME);
 // Windows groups notifications and taskbar entries by this id; it must match the
 // installer's shortcut (electron-builder uses build.appId).
 if (IS_WIN) app.setAppUserModelId('com.backquant.desktop');
+
+// The log is opened once the app is ready (its folder is the app's own logs folder).
+let diag = null;
+const logEvent = (event, details) => diag && diag.write(event, details);
+// How long a frozen page waits before it offers a reload.
+const FREEZE_OFFER_MS = 30_000;
+const METRICS_EVERY_MS = 5 * 60 * 1000;
 
 let mainWindow = null;
 let tray = null;
@@ -344,6 +354,45 @@ function autostartItem() {
   };
 }
 
+/** Help > Save Diagnostics: the log, the versions, the GPU details and memory now, in one file. */
+async function saveDiagnostics() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow ?? undefined, {
+    title: 'Save Diagnostics',
+    defaultPath: path.join(app.getPath('downloads'), `backquant-diagnostics-${stamp}.txt`),
+  });
+  if (canceled || !filePath) return;
+  let gpuInfo = null;
+  try {
+    gpuInfo = await app.getGPUInfo('basic');
+  } catch {
+    // Not available: left out.
+  }
+  const report = [
+    `${APP_NAME} ${app.getVersion()}  Electron ${process.versions.electron}  Chrome ${process.versions.chrome}`,
+    `${process.platform} ${os.release()} ${process.arch}, ${Math.round(os.totalmem() / 1024 ** 3)} GB memory, up ${Math.round(process.uptime() / 60)} min`,
+    `Page: ${mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : '-'}`,
+    '',
+    'GPU features:',
+    JSON.stringify(app.getGPUFeatureStatus(), null, 2),
+    '',
+    'GPU:',
+    JSON.stringify(gpuInfo, null, 2),
+    '',
+    'Memory and CPU by process type now:',
+    JSON.stringify(summarizeMetrics(app.getAppMetrics()), null, 2),
+    '',
+    'Log:',
+    diag ? diag.read() : '(no log)',
+  ].join('\n');
+  try {
+    fs.writeFileSync(filePath, report);
+    shell.showItemInFolder(filePath);
+  } catch (error) {
+    dialog.showErrorBox('Save Diagnostics', `Could not save the file: ${error.message}`);
+  }
+}
+
 function rebuildMenus() {
   const nav = (fn) => () => mainWindow && fn(mainWindow.webContents);
   const viewMenu = {
@@ -369,7 +418,14 @@ function rebuildMenus() {
       { role: 'togglefullscreen' },
     ],
   };
-  const helpMenu = { role: 'help', submenu: [{ label: 'BackQuant Documentation', click: () => openExternal(DOCS_URL) }] };
+  const helpMenu = {
+    role: 'help',
+    submenu: [
+      { label: 'BackQuant Documentation', click: () => openExternal(DOCS_URL) },
+      { type: 'separator' },
+      { label: 'Save Diagnostics...', click: () => saveDiagnostics() },
+    ],
+  };
   // Windows: a plain File menu (the window hides the menu bar; Alt shows it, and the
   // shortcuts work either way). macOS keeps the standard app menu.
   const winTemplate = [
@@ -507,6 +563,8 @@ function createMainWindow(visible) {
   });
 
   const wc = win.webContents;
+  // The GPU setup as it really is once the page has drawn (read at start, before the GPU process runs, it says software).
+  wc.once('did-finish-load', () => logEvent('gpu', app.getGPUFeatureStatus()));
 
   // Main-frame navigations: OAuth goes to the browser, foreign sites too.
   const guard = (e, url) => {
@@ -539,9 +597,45 @@ function createMainWindow(visible) {
     return { action: 'deny' };
   });
 
+  // A page that stops answering (a long script, a stalled GPU): logged with how long, and after
+  // FREEZE_OFFER_MS a choice to reload it or keep waiting.
+  let frozenAt = null;
+  let freezeTimer = null;
+  wc.on('unresponsive', () => {
+    if (frozenAt) return;
+    frozenAt = Date.now();
+    logEvent('page-unresponsive', { url: wc.getURL() });
+    freezeTimer = setTimeout(async () => {
+      if (!frozenAt || win.isDestroyed()) return;
+      logEvent('page-still-unresponsive', { forMs: Date.now() - frozenAt });
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Reload', 'Keep Waiting'],
+        defaultId: 0,
+        cancelId: 1,
+        message: 'The terminal is not responding',
+        detail: `It has not responded for ${durationText(Date.now() - frozenAt)}. Reload it, or keep waiting.`,
+      });
+      if (response === 0 && frozenAt && !win.isDestroyed()) {
+        logEvent('page-reloaded-after-freeze', { forMs: Date.now() - frozenAt });
+        wc.forcefullyCrashRenderer();
+        wc.reload();
+      }
+    }, FREEZE_OFFER_MS);
+  });
+  wc.on('responsive', () => {
+    if (!frozenAt) return;
+    logEvent('page-responsive', { frozeMs: Date.now() - frozenAt });
+    frozenAt = null;
+    clearTimeout(freezeTimer);
+  });
+
   // A page process that dies leaves a blank window: reload it (see crash.js).
   let crashes = [];
   wc.on('render-process-gone', (_e, details) => {
+    logEvent('page-process-gone', { reason: details.reason, exitCode: details.exitCode });
+    frozenAt = null;
+    clearTimeout(freezeTimer);
     const out = afterCrash(details.reason, crashes, Date.now());
     crashes = out.recent;
     if (out.action === 'ignore' || win.isDestroyed()) return;
@@ -622,6 +716,17 @@ if (!app.requestSingleInstanceLock()) {
     // App Nap would stall the hidden page's timers (WebSocket keepalive and
     // reconnect). The Mac can still sleep; this only keeps the app awake-able.
     powerSaveBlocker.start('prevent-app-suspension');
+
+    diag = new DiagLog(app.getPath('logs'));
+    logEvent('app-start', {
+      app: app.getVersion(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      os: `${process.platform} ${os.release()} ${process.arch}`,
+    });
+    // The GPU process, utilities and helpers: a GPU process that dies blanks or freezes the charts.
+    app.on('child-process-gone', (_e, details) => logEvent('child-process-gone', details));
+    setInterval(() => logEvent('metrics', summarizeMetrics(app.getAppMetrics())), METRICS_EVERY_MS);
 
     setupSession();
     loopbackOk = await startLoopback();
